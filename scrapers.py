@@ -68,7 +68,7 @@ def fetch_usd_price():
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'html5lib')
         price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
         
         if price_elem:
@@ -90,7 +90,7 @@ def fetch_gold_price():
         url = "https://www.tgju.org/profile/geram18"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'html5lib')
         
         price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
         if price_elem:
@@ -111,7 +111,7 @@ def fetch_silver_price():
         url = "https://www.tgju.org/profile/silver"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'html5lib')
         
         price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
         if price_elem:
@@ -132,7 +132,7 @@ def fetch_metal_price(name_fa, name_en, slug, emoji):
         url = f"https://www.investing.com/commodities/{slug}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'html5lib')
         
         price_elem = soup.find('span', {'data-test': 'instrument-price-last'})
         if not price_elem:
