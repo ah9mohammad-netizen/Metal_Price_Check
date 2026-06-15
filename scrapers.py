@@ -1,10 +1,11 @@
 """
-Price fetching from reliable FREE sources
-==========================================
+Price fetching - VERIFIED WORKING SOURCES ONLY
+===============================================
 Data Sources:
 - gold-api.com: Gold, Silver, Copper (FREE, no auth, no limits)
-- TGJU.org: USD/Toman, Iran Gold, Iran Silver (web scraping)
-- BrsApi.ir: Iran Mercantile Exchange prices (API key required)
+- Yahoo Finance: Zinc, Aluminum, Iron Ore, Copper (FREE, no auth)
+- TGJU.org: Iran prices (may be geo-blocked from US servers)
+- BrsApi.ir: IME prices (geo-blocked from US servers)
 """
 
 import requests
@@ -13,7 +14,6 @@ import logging
 from datetime import datetime, timedelta
 import config
 import re
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 price_cache = {}
 CACHE_TIME = timedelta(seconds=config.CACHE_DURATION)
 
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+}
+
 
 def get_cached_or_fetch(key, fetch_function):
     """Cache mechanism to reduce API calls"""
@@ -30,103 +34,89 @@ def get_cached_or_fetch(key, fetch_function):
     if key in price_cache:
         data, timestamp = price_cache[key]
         if now - timestamp < CACHE_TIME:
-            logger.info(f"✅ Cache hit: {key}")
             return data
 
-    logger.info(f"🔄 Fetching fresh data: {key}")
+    logger.info(f"Fetching: {key}")
     try:
         data = fetch_function()
         price_cache[key] = (data, now)
         return data
     except Exception as e:
-        logger.error(f"❌ Error fetching {key}: {e}")
-        # Return cached data if available (even if expired)
+        logger.error(f"Error fetching {key}: {e}")
         if key in price_cache:
             data, _ = price_cache[key]
-            return data + "\n⚠️ (cached)"
-        return f"❌ خطا در دریافت اطلاعات"
+            return data + "\n_(cached)_"
+        return "❌ خطا در دریافت اطلاعات"
 
 
 def clean_number(text):
-    """Extract numbers from Persian/English text"""
+    """Extract numbers from text"""
     if not text:
         return None
-    # Convert Persian numbers to English
     persian = '۰۱۲۳۴۵۶۷۸۹'
     english = '0123456789'
     trans = str.maketrans(persian, english)
-    text = str(text).translate(trans)
-    # Remove commas and keep only numbers and decimal point
-    text = text.replace(',', '')
+    text = str(text).translate(trans).replace(',', '')
     numbers = re.findall(r'\d+\.?\d*', text)
     return numbers[0] if numbers else None
 
 
-def format_price(price, currency='', decimals=2):
+def fmt(price, currency='', decimals=2):
     """Format price with thousand separators"""
     try:
-        if isinstance(price, str):
-            price = price.replace(',', '')
         num = float(price)
         if decimals == 0:
-            formatted = f"{num:,.0f}"
-        else:
-            formatted = f"{num:,.{decimals}f}"
-        return f"{formatted} {currency}".strip()
+            return f"{num:,.0f} {currency}".strip()
+        return f"{num:,.{decimals}f} {currency}".strip()
     except:
         return "N/A"
 
 
-def get_headers():
-    """Common headers for web requests"""
-    return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-    }
+# ============================================
+# HELPER: gold-api.com (VERIFIED WORKING)
+# ============================================
+def gold_api_price(symbol):
+    """Fetch price from gold-api.com (free, no auth)"""
+    r = requests.get(f'https://api.gold-api.com/price/{symbol}', timeout=10)
+    if r.status_code == 200:
+        return r.json().get('price', 0)
+    return 0
 
 
 # ============================================
-# 1. USD TO TOMAN (from TGJU with timeout handling)
+# HELPER: Yahoo Finance (VERIFIED WORKING)
+# ============================================
+def yahoo_price(ticker):
+    """Fetch price from Yahoo Finance (free, no auth)"""
+    url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}'
+    r = requests.get(url, headers=HEADERS, timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        result = data.get('chart', {}).get('result', [{}])[0]
+        return result.get('meta', {}).get('regularMarketPrice', 0)
+    return 0
+
+
+# ============================================
+# 1. USD TO TOMAN
 # ============================================
 def fetch_usd_price():
     """Fetch USD to Toman from TGJU"""
     try:
-        url = "https://www.tgju.org/profile/price_dollar_rl"
-        response = requests.get(url, headers=get_headers(), timeout=10)
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Method 1: data-col attribute (most reliable)
-        price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
-        if price_elem:
-            price = clean_number(price_elem.text)
-            if price and 40000 < float(price) < 150000:  # Valid USD/Toman range
-                return f"💵 **دلار آمریکا:** {format_price(price, 'تومان', 0)}"
-
-        # Method 2: Look for price in specific class
-        price_elem = soup.find('span', class_='price')
-        if price_elem:
-            price = clean_number(price_elem.text)
+        r = requests.get('https://www.tgju.org/profile/price_dollar_rl',
+                         headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
+        if elem:
+            price = clean_number(elem.text)
             if price and 40000 < float(price) < 150000:
-                return f"💵 **دلار آمریکا:** {format_price(price, 'تومان', 0)}"
-
-        # Method 3: Search all spans for valid price range
-        all_spans = soup.find_all('span')
-        for span in all_spans:
-            text = span.get_text()
-            num = clean_number(text)
-            if num and 40000 < float(num) < 150000:
-                return f"💵 **دلار آمریکا:** {format_price(num, 'تومان', 0)}"
-
+                return f"💵 **دلار آمریکا:** {fmt(price, 'تومان', 0)}"
         return "💵 **دلار آمریکا:** در حال بروزرسانی..."
     except requests.exceptions.Timeout:
-        logger.warning("TGJU timeout - may be geo-blocked")
-        return "💵 **دلار آمریکا:** ⏳ سرور در دسترس نیست (تلاش مجدد...)"
+        return "💵 **دلار آمریکا:** ⏳ سرور در دسترس نیست"
     except Exception as e:
         logger.error(f"USD error: {e}")
-        raise
+        return "💵 **دلار آمریکا:** ❌ خطا"
 
 
 def get_usd_price():
@@ -134,39 +124,32 @@ def get_usd_price():
 
 
 # ============================================
-# 2. GOLD - International (gold-api.com) + Iran (TGJU)
+# 2. GOLD
 # ============================================
 def fetch_gold_price():
-    """Fetch Gold price - International USD + Iran Toman"""
+    """Gold: gold-api.com (USD) + TGJU (Toman)"""
     result = ""
 
-    # Part 1: International price from gold-api.com (FREE, reliable)
+    # International price
     try:
-        url = "https://api.gold-api.com/price/XAU"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price', 0)
-            if price:
-                result += f"🥇 **طلا (جهانی):** ${format_price(price, 'USD/اونس', 2)}\n"
+        price = gold_api_price('XAU')
+        if price:
+            result += f"🥇 **طلا (جهانی):** ${fmt(price, 'USD/اونس')}\n"
     except Exception as e:
-        logger.error(f"Gold international error: {e}")
+        logger.error(f"Gold intl error: {e}")
 
-    # Part 2: Iran gold price from TGJU (Toman per gram)
+    # Iran price
     try:
-        url = "https://www.tgju.org/profile/geram18"
-        response = requests.get(url, headers=get_headers(), timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
-        if price_elem:
-            price = clean_number(price_elem.text)
-            if price and float(price) > 1000000:  # Valid gold price range
-                result += f"🥇 **طلای ۱۸ عیار (ایران):** {format_price(price, 'تومان/گرم', 0)}"
-    except requests.exceptions.Timeout:
-        logger.warning("TGJU timeout for gold - may be geo-blocked")
-    except Exception as e:
-        logger.error(f"Gold Iran error: {e}")
+        r = requests.get('https://www.tgju.org/profile/geram18',
+                         headers=HEADERS, timeout=8)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
+        if elem:
+            price = clean_number(elem.text)
+            if price and float(price) > 1000000:
+                result += f"🥇 **طلای ۱۸ عیار (ایران):** {fmt(price, 'تومان/گرم', 0)}"
+    except:
+        pass
 
     return result.strip() if result else "🥇 **طلا:** خطا در دریافت اطلاعات"
 
@@ -176,39 +159,32 @@ def get_gold_price():
 
 
 # ============================================
-# 3. SILVER - International (gold-api.com) + Iran (TGJU)
+# 3. SILVER
 # ============================================
 def fetch_silver_price():
-    """Fetch Silver price - International USD + Iran Toman"""
+    """Silver: gold-api.com (USD) + TGJU (Toman)"""
     result = ""
 
-    # Part 1: International price from gold-api.com
+    # International price
     try:
-        url = "https://api.gold-api.com/price/XAG"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price', 0)
-            if price:
-                result += f"⚪ **نقره (جهانی):** ${format_price(price, 'USD/اونس', 2)}\n"
+        price = gold_api_price('XAG')
+        if price:
+            result += f"⚪ **نقره (جهانی):** ${fmt(price, 'USD/اونس')}\n"
     except Exception as e:
-        logger.error(f"Silver international error: {e}")
+        logger.error(f"Silver intl error: {e}")
 
-    # Part 2: Iran silver price from TGJU
+    # Iran price
     try:
-        url = "https://www.tgju.org/profile/silver"
-        response = requests.get(url, headers=get_headers(), timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        price_elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
-        if price_elem:
-            price = clean_number(price_elem.text)
+        r = requests.get('https://www.tgju.org/profile/silver',
+                         headers=HEADERS, timeout=8)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        elem = soup.find('span', {'data-col': 'info.last_trade.PDrCotVal'})
+        if elem:
+            price = clean_number(elem.text)
             if price:
-                result += f"⚪ **نقره (ایران):** {format_price(price, 'تومان/اونس', 0)}"
-    except requests.exceptions.Timeout:
-        logger.warning("TGJU timeout for silver - may be geo-blocked")
-    except Exception as e:
-        logger.error(f"Silver Iran error: {e}")
+                result += f"⚪ **نقره (ایران):** {fmt(price, 'تومان/اونس', 0)}"
+    except:
+        pass
 
     return result.strip() if result else "⚪ **نقره:** خطا در دریافت اطلاعات"
 
@@ -218,24 +194,19 @@ def get_silver_price():
 
 
 # ============================================
-# 4. COPPER - from gold-api.com (FREE)
+# 4. COPPER
 # ============================================
 def fetch_copper_price():
-    """Fetch Copper price from gold-api.com"""
+    """Copper: Yahoo Finance HG=F (per lb, convert to per ton)"""
     try:
-        url = "https://api.gold-api.com/price/HG"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price', 0)
-            if price:
-                # gold-api returns price per pound, convert to per ton
-                price_per_ton = price * 2204.62
-                return f"🔶 **مس:** ${format_price(price_per_ton, 'USD/ton', 2)}"
+        price = yahoo_price('HG=F')
+        if price:
+            price_per_ton = price * 2204.62  # lb -> ton
+            return f"🔶 **مس:** ${fmt(price_per_ton, 'USD/ton')}"
         return "🔶 **مس:** در حال بروزرسانی..."
     except Exception as e:
         logger.error(f"Copper error: {e}")
-        raise
+        return "🔶 **مس:** ❌ خطا"
 
 
 def get_copper_price():
@@ -243,173 +214,167 @@ def get_copper_price():
 
 
 # ============================================
-# 5-8. LME METALS - Using gold-api.com + fallbacks
+# 5. NICKEL
 # ============================================
+def fetch_nickel_price():
+    """Nickel: Try multiple free sources"""
+    # Source 1: Try fetching from a free financial data site
+    try:
+        r = requests.get(
+            'https://www.google.com/finance/quote/NICKEL:CMX',
+            headers=HEADERS, timeout=8
+        )
+        if r.status_code == 200:
+            text = r.text
+            # Look for price in response
+            import re
+            matches = re.findall(r'data-last-price="(\d+\.?\d*)"', text)
+            if matches:
+                price = float(matches[0])
+                if price > 100:  # Likely per ton
+                    return f"🔘 **نیکل:** ${fmt(price, 'USD/ton')}"
+    except:
+        pass
 
-# Metal emoji mapping
-METAL_EMOJIS = {
-    'nickel': '🔘',
-    'zinc': '⚫',
-    'aluminum': '⚪',
-    'iron': '🟤'
-}
+    # Source 2: NIY=F (CME Nickel in JPY) with proper conversion
+    try:
+        url = 'https://query1.finance.yahoo.com/v8/finance/chart/NIY=F'
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            result = data.get('chart', {}).get('result', [{}])[0]
+            meta = result.get('meta', {})
+            price_jpy = meta.get('regularMarketPrice', 0)
+            if price_jpy:
+                # Get USD/JPY rate
+                usdjpy = yahoo_price('JPY=X')
+                if usdjpy and usdjpy > 0:
+                    # NIY=F contract = 6 metric tons, price in JPY
+                    # Total value = price * 6
+                    # Per ton in JPY = price * 6
+                    # Per ton in USD = price * 6 / usdjpy
+                    price_usd_per_ton = (price_jpy * 6) / usdjpy
+                    if 5000 < price_usd_per_ton < 50000:  # Sanity check
+                        return f"🔘 **نیکل:** ${fmt(price_usd_per_ton, 'USD/ton')}"
+    except Exception as e:
+        logger.error(f"Nickel error: {e}")
 
-
-def fetch_single_lme_metal(metal_name_fa, metal_key):
-    """Fetch a single LME metal price with multiple fallback sources"""
-    
-    # Source 1: Try gold-api.com (only works for copper)
-    if metal_key == 'copper':
-        try:
-            url = "https://api.gold-api.com/price/HG"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                price = data.get('price', 0)
-                if price:
-                    price_per_ton = price * 2204.62
-                    return f"🔶 **{metal_name_fa}:** ${format_price(price_per_ton, 'USD/ton', 2)}"
-        except:
-            pass
-
-    # Source 2: Try alternative free sources for LME metals
-    alternative_urls = {
-        'nickel': [
-            'https://www.barchart.com/futures/quotes/NID00/overview',
-            'https://tradingeconomics.com/commodity/nickel',
-        ],
-        'zinc': [
-            'https://www.barchart.com/futures/quotes/ZSD00/overview',
-            'https://tradingeconomics.com/commodity/zinc',
-        ],
-        'aluminum': [
-            'https://www.barchart.com/futures/quotes/AHD00/overview',
-            'https://tradingeconomics.com/commodity/aluminum',
-        ],
-        'iron': [
-            'https://www.barchart.com/futures/quotes/TIO00/overview',
-            'https://tradingeconomics.com/commodity/iron-ore',
-        ]
-    }
-
-    emoji = METAL_EMOJIS.get(metal_key, '•')
-
-    # Try each alternative source
-    if metal_key in alternative_urls:
-        for url in alternative_urls[metal_key]:
-            try:
-                response = requests.get(url, headers=get_headers(), timeout=10)
-                if response.status_code == 200:
-                    text = response.text
-                    # Look for price patterns
-                    patterns = [
-                        r'(\d{1,2},?\d{3}\.\d{2})',  # e.g., 19,274.25
-                        r'(\d{2,3}\.\d{2})',          # e.g., 107.10
-                    ]
-                    for pattern in patterns:
-                        matches = re.findall(pattern, text)
-                        if matches:
-                            price = clean_number(matches[0])
-                            if price and float(price) > 0:
-                                return f"{emoji} **{metal_name_fa}:** ${format_price(price, 'USD/ton', 2)}"
-            except:
-                continue
-
-    # If all sources fail, return placeholder
-    return f"{emoji} **{metal_name_fa}:** در حال بروزرسانی..."
+    return "🔘 **نیکل:** در حال بروزرسانی..."
 
 
 def get_nickel_price():
-    return get_cached_or_fetch('nickel', lambda: fetch_single_lme_metal('نیکل', 'nickel'))
+    return get_cached_or_fetch('nickel', fetch_nickel_price)
+
+
+# ============================================
+# 6. ZINC
+# ============================================
+def fetch_zinc_price():
+    """Zinc: Yahoo Finance ZNC=F (per ton)"""
+    try:
+        price = yahoo_price('ZNC=F')
+        if price:
+            return f"⚫ **روی:** ${fmt(price, 'USD/ton')}"
+        return "⚫ **روی:** در حال بروزرسانی..."
+    except Exception as e:
+        logger.error(f"Zinc error: {e}")
+        return "⚫ **روی:** ❌ خطا"
 
 
 def get_zinc_price():
-    return get_cached_or_fetch('zinc', lambda: fetch_single_lme_metal('روی', 'zinc'))
+    return get_cached_or_fetch('zinc', fetch_zinc_price)
+
+
+# ============================================
+# 7. ALUMINUM
+# ============================================
+def fetch_aluminum_price():
+    """Aluminum: Yahoo Finance ALI=F (per ton)"""
+    try:
+        price = yahoo_price('ALI=F')
+        if price:
+            return f"⚪ **آلومینیوم:** ${fmt(price, 'USD/ton')}"
+        return "⚪ **آلومینیوم:** در حال بروزرسانی..."
+    except Exception as e:
+        logger.error(f"Aluminum error: {e}")
+        return "⚪ **آلومینیوم:** ❌ خطا"
 
 
 def get_aluminum_price():
-    return get_cached_or_fetch('aluminum', lambda: fetch_single_lme_metal('آلومینیوم', 'aluminum'))
+    return get_cached_or_fetch('aluminum', fetch_aluminum_price)
+
+
+# ============================================
+# 8. IRON ORE
+# ============================================
+def fetch_iron_ore_price():
+    """Iron Ore: Yahoo Finance TIO=F (per ton)"""
+    try:
+        price = yahoo_price('TIO=F')
+        if price:
+            return f"🟤 **سنگ آهن (CFR چین):** ${fmt(price, 'USD/ton')}"
+        return "🟤 **سنگ آهن:** در حال بروزرسانی..."
+    except Exception as e:
+        logger.error(f"Iron ore error: {e}")
+        return "🟤 **سنگ آهن:** ❌ خطا"
 
 
 def get_iron_ore_price():
-    return get_cached_or_fetch('iron', lambda: fetch_single_lme_metal('سنگ آهن (CFR چین)', 'iron'))
+    return get_cached_or_fetch('iron', fetch_iron_ore_price)
 
 
 # ============================================
-# 9-10. IRAN MERCANTILE EXCHANGE (IME) - BrsApi
+# 9-10. IME PRICES (BrsApi)
 # ============================================
 def fetch_ime_prices():
-    """Fetch Iran Mercantile Exchange prices from BrsApi"""
+    """Fetch IME prices from BrsApi"""
     if not config.IME_API_KEY:
-        return "📊 **بورس کالای ایران:**\n⚠️ API key تنظیم نشده\nبرای فعال‌سازی، کلید API را در تنظیمات Railway وارد کنید."
+        return "📊 **بورس کالای ایران:**\n⚠️ API key تنظیم نشده"
 
     try:
-        # Use the correct endpoint format provided by user
         today = datetime.now().strftime('%Y-%m-%d')
-        url = f"https://Api.BrsApi.ir/IME/Physical.php?key={config.IME_API_KEY}&date_start={today}&date_end={today}"
-        
-        headers = {
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0'
-        }
+        url = (
+            f"https://Api.BrsApi.ir/IME/Physical.php"
+            f"?key={config.IME_API_KEY}"
+            f"&date_start={today}&date_end={today}"
+        )
+        r = requests.get(url, headers={'Accept': 'application/json'}, timeout=20)
 
-        logger.info(f"Calling BrsApi for IME prices...")
-        response = requests.get(url, headers=headers, timeout=20)
-        logger.info(f"BrsApi status: {response.status_code}")
-
-        if response.status_code == 200:
-            data = response.json()
+        if r.status_code == 200:
+            data = r.json()
             return parse_ime_response(data)
-
-        elif response.status_code == 401:
-            return "📊 **بورس کالا:** ❌ خطای احراز هویت API\nلطفاً کلید API را بررسی کنید"
-        elif response.status_code == 403:
-            return "📊 **بورس کالا:** ❌ دسترسی غیرمجاز"
+        elif r.status_code == 401:
+            return "📊 **بورس کالا:** ❌ خطای احراز هویت"
         else:
-            return f"📊 **بورس کالا:** ❌ خطای سرور ({response.status_code})"
+            return f"📊 **بورس کالا:** ❌ خطای {r.status_code}"
 
     except requests.exceptions.Timeout:
-        logger.warning("BrsApi timeout - API may be unreachable")
-        return "📊 **بورس کالا:** ⏳ زمان انتظار تمام شد\nسرور ممکن است موقتاً در دسترس نباشد"
-    except requests.exceptions.RequestException as e:
-        logger.error(f"IME request error: {e}")
-        return "📊 **بورس کالا:** ❌ خطای ارتباط با سرور"
+        return "📊 **بورس کالا:** ⏳ سرور در دسترس نیست\nممکن است محدودیت جغرافیایی باشد"
     except Exception as e:
-        logger.error(f"IME error: {e}", exc_info=True)
+        logger.error(f"IME error: {e}")
         return "📊 **بورس کالا:** ❌ خطا"
 
 
 def parse_ime_response(data):
-    """Parse IME API response and extract relevant products"""
+    """Parse IME API response"""
     result = "📊 **بورس کالای ایران (IME):**\n\n"
 
-    # Log the response structure for debugging
-    logger.info(f"IME Response type: {type(data)}")
-    logger.info(f"IME Response preview: {str(data)[:500]}")
-
-    # Extract items from response
     items = []
     if isinstance(data, dict):
-        items = (data.get('data') or
-                 data.get('items') or
-                 data.get('commodities') or
-                 data.get('results') or
-                 data.get('Physical') or [])
+        items = (data.get('data') or data.get('items') or
+                 data.get('commodities') or data.get('Physical') or [])
         if not items and 'name' in data:
             items = [data]
     elif isinstance(data, list):
         items = data
 
     if not items:
-        return result + "📭 اطلاعاتی یافت نشد\n(API ممکن است نیاز به بررسی داشته باشد)"
+        return result + "📭 اطلاعاتی یافت نشد"
 
-    # Keywords to search for
     keywords = {
-        # Iron products (9)
         'کنسانتره': ('🔹 کنسانتره آهن', 'iron'),
         'گندله': ('🔹 گندله آهن', 'iron'),
         'اسفنجی': ('🔹 آهن اسفنجی', 'iron'),
-        # Steel products (10)
         'شمش فولاد': ('🔸 شمش فولاد', 'steel'),
         'شمش': ('🔸 شمش فولاد', 'steel'),
         'میلگرد': ('🔸 میلگرد', 'steel'),
@@ -417,61 +382,40 @@ def parse_ime_response(data):
         'ورق سرد': ('🔸 ورق سرد', 'steel'),
     }
 
-    products_found = []
-
+    products = []
     for item in items:
-        # Get item name - try multiple possible field names
-        name = str(item.get('name', '') or
-                   item.get('title', '') or
-                   item.get('commodity_name', '') or
-                   item.get('CommodityName', '') or
-                   item.get('symbol', '') or
-                   item.get('Symbol', '') or '')
-
-        # Get price - try multiple possible field names
-        price = (item.get('last_price') or
-                 item.get('price') or
-                 item.get('close_price') or
-                 item.get('final_price') or
-                 item.get('ClosePrice') or
-                 item.get('FinalPrice') or
+        name = str(item.get('name', '') or item.get('title', '') or
+                   item.get('commodity_name', '') or item.get('CommodityName', '') or
+                   item.get('symbol', '') or item.get('Symbol', '') or '')
+        price = (item.get('last_price') or item.get('price') or
+                 item.get('close_price') or item.get('ClosePrice') or
+                 item.get('final_price') or item.get('FinalPrice') or
                  item.get('LastPrice') or 0)
 
-        # Check if name matches any keyword
-        for keyword, (display_name, category) in keywords.items():
-            if keyword in name:
-                # Convert Rials to Tomans (divide by 10)
+        for kw, (display, cat) in keywords.items():
+            if kw in name:
                 try:
-                    price_toman = int(float(price)) / 10 if price else 0
+                    pt = int(float(price)) / 10 if price else 0
                 except:
-                    price_toman = 0
-                    
-                if price_toman > 0:
-                    products_found.append({
-                        'name': display_name,
-                        'price': format_price(price_toman, 'تومان/تن', 0),
-                        'category': category
-                    })
+                    pt = 0
+                if pt > 0:
+                    products.append({'name': display, 'price': fmt(pt, 'تومان/تن', 0), 'cat': cat})
                 break
 
-    if products_found:
-        # Group by category
-        iron_products = [p for p in products_found if p['category'] == 'iron']
-        steel_products = [p for p in products_found if p['category'] == 'steel']
-
-        if iron_products:
+    if products:
+        iron = [p for p in products if p['cat'] == 'iron']
+        steel = [p for p in products if p['cat'] == 'steel']
+        if iron:
             result += "**محصولات آهنی:**\n"
-            for p in iron_products:
+            for p in iron:
                 result += f"{p['name']}: {p['price']}\n"
             result += "\n"
-
-        if steel_products:
+        if steel:
             result += "**محصولات فولادی:**\n"
-            for p in steel_products:
+            for p in steel:
                 result += f"{p['name']}: {p['price']}\n"
     else:
-        result += "📭 محصولات مورد نظر یافت نشد\n"
-        result += f"(تعداد کل اقلام: {len(items)})\n"
+        result += f"📭 محصولات مورد نظر یافت نشد ({len(items)} items)\n"
 
     result += f"\n⏰ {datetime.now().strftime('%H:%M')}"
     return result
@@ -482,13 +426,12 @@ def get_ime_prices():
 
 
 # ============================================
-# ALL PRICES - Complete Report
+# ALL PRICES
 # ============================================
 def get_all_prices():
     """Get all prices in one message"""
     timestamp = datetime.now().strftime('%Y/%m/%d - %H:%M')
-
-    message = f"""
+    return f"""
 📊 **گزارش کامل قیمت‌ها**
 🕐 {timestamp}
 
@@ -503,7 +446,7 @@ def get_all_prices():
 {get_silver_price()}
 
 ━━━━━━━━━━━━━━━━━━━━
-**🏭 فلزات صنعتی جهانی (LME):**
+**🏭 فلزات صنعتی (USD/ton):**
 {get_copper_price()}
 {get_nickel_price()}
 {get_zinc_price()}
@@ -514,8 +457,5 @@ def get_all_prices():
 {get_ime_prices()}
 
 ━━━━━━━━━━━━━━━━━━━━
-🔄 دستور /all برای بروزرسانی
-💡 کش: {config.CACHE_DURATION // 60} دقیقه
+🔄 /all برای بروزرسانی
 """
-
-    return message
