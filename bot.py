@@ -1,10 +1,19 @@
 """
 Telegram Metal & Currency Price Bot
+===================================
+Features:
+- USD to Toman exchange rate
+- Gold & Silver prices (International + Iran)
+- Industrial metals (Copper, Nickel, Zinc, Aluminum, Iron Ore)
+- Iran Mercantile Exchange (IME) prices
+- Inline keyboard for easy navigation
+- Caching to reduce API calls
 """
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.constants import ParseMode
 from datetime import datetime
 import config
 import scrapers
@@ -12,12 +21,13 @@ import scrapers
 # Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO)
 )
 logger = logging.getLogger(__name__)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message with buttons"""
+
+def get_main_keyboard():
+    """Create the main inline keyboard"""
     keyboard = [
         [
             InlineKeyboardButton("💵 دلار", callback_data='usd'),
@@ -33,6 +43,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("⚪ آلومینیوم", callback_data='aluminum'),
+            InlineKeyboardButton("🔩 سرب", callback_data='lead')
+        ],
+        [
+            InlineKeyboardButton("🪙 قلع", callback_data='tin'),
             InlineKeyboardButton("🟤 سنگ آهن", callback_data='iron')
         ],
         [
@@ -40,47 +54,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("📈 همه قیمت‌ها", callback_data='all')
+        ],
+        [
+            InlineKeyboardButton("🔄 بروزرسانی", callback_data='refresh')
         ]
     ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome = """
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_welcome_message():
+    """Get the welcome message text"""
+    return """
 🤖 **ربات قیمت فلزات و ارز**
 
 📊 **قیمت‌های لحظه‌ای:**
 
 ✅ دلار آمریکا (بازار آزاد ایران)
-✅ طلا و نقره (بازار ایران - تومان)
-✅ فلزات صنعتی جهانی (USD)
+✅ طلا و نقره (بین‌المللی + ایران)
+✅ فلزات صنعتی جهانی (USD/ton)
    • مس، نیکل، روی، آلومینیوم
-✅ سنگ آهن CFR چین (USD)
+   • سرب، قلع
+✅ سنگ آهن CFR چین
 ✅ بورس کالای ایران (تومان)
    • کنسانتره، گندله، آهن اسفنجی
    • شمش فولاد، میلگرد، ورق
 
-⏱ بروزرسانی هر ۵ دقیقه
+⏱ بروزرسانی هر {cache_min} دقیقه
 
 🔽 انتخاب کنید:
-    """
-    
+""".format(cache_min=config.CACHE_DURATION // 60)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message with buttons"""
     user = update.effective_user
-    logger.info(f"User {user.id} (@{user.username}) started")
-    
-    await update.message.reply_text(welcome, reply_markup=reply_markup)
+    logger.info(f"👤 User {user.id} (@{user.username}) started the bot")
+
+    welcome = get_welcome_message()
+    reply_markup = get_main_keyboard()
+
+    await update.message.reply_text(
+        welcome,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses"""
     query = update.callback_query
     await query.answer()
-    
+
     choice = query.data
     user = update.effective_user
-    logger.info(f"User {user.id} requested: {choice}")
-    
+    logger.info(f"👤 User {user.id} requested: {choice}")
+
+    # Show loading message
     loading = await query.message.reply_text("⏳ لطفا صبر کنید...")
-    
+
     try:
+        # Map choices to handler functions
         handlers = {
             'usd': scrapers.get_usd_price,
             'gold': scrapers.get_gold_price,
@@ -89,34 +122,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'nickel': scrapers.get_nickel_price,
             'zinc': scrapers.get_zinc_price,
             'aluminum': scrapers.get_aluminum_price,
+            'lead': scrapers.get_lead_price,
+            'tin': scrapers.get_tin_price,
             'iron': scrapers.get_iron_ore_price,
             'ime': scrapers.get_ime_prices,
-            'all': scrapers.get_all_prices
+            'all': scrapers.get_all_prices,
+            'refresh': scrapers.get_all_prices,
         }
-        
+
         if choice in handlers:
             result = handlers[choice]()
         else:
             result = "❌ گزینه نامعتبر"
-        
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        result += f"\n\n🕐 {timestamp}"
-        
-        await loading.edit_text(result)
-        
+
+        # Add Tehran timestamp
+        from datetime import timedelta, timezone
+        tehran_tz = timezone(timedelta(hours=3, minutes=30))
+        timestamp = datetime.now(tehran_tz).strftime('%Y/%m/%d - %H:%M')
+        result += f"\n\n🕐 {timestamp} (تهران)"
+
+        # Add back button for single metal views
+        if choice not in ['all', 'refresh']:
+            back_keyboard = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='menu')]]
+            reply_markup = InlineKeyboardMarkup(back_keyboard)
+        else:
+            reply_markup = get_main_keyboard()
+
+        # Edit the loading message with the result
+        await loading.edit_text(
+            result,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
     except Exception as e:
-        logger.error(f"Error in button handler: {e}", exc_info=True)
-        await loading.edit_text("❌ خطا در دریافت اطلاعات\nلطفا دوباره تلاش کنید")
+        logger.error(f"❌ Error in button handler: {e}", exc_info=True)
+        await loading.edit_text(
+            "❌ خطا در دریافت اطلاعات\nلطفا دوباره تلاش کنید",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data='menu')]
+            ])
+        )
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle menu button to return to main menu"""
+    query = update.callback_query
+    await query.answer()
+
+    welcome = get_welcome_message()
+    reply_markup = get_main_keyboard()
+
+    await query.message.edit_text(
+        welcome,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 
 async def all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all prices via /all command"""
-    loading = await update.message.reply_text("⏳ در حال دریافت...")
+    loading = await update.message.reply_text("⏳ در حال دریافت تمام قیمت‌ها...")
+
     try:
         result = scrapers.get_all_prices()
-        await loading.edit_text(result)
+
+        await loading.edit_text(
+            result,
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
     except Exception as e:
         logger.error(f"All command error: {e}")
-        await loading.edit_text("❌ خطا")
+        await loading.edit_text("❌ خطا در دریافت اطلاعات")
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help message"""
@@ -124,46 +203,72 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📖 **راهنمای ربات**
 
 **دستورات:**
-/start - منوی اصلی
+/start - منوی اصلی با دکمه‌ها
 /all - نمایش همه قیمت‌ها
-/help - راهنما
+/help - این راهنما
 
-**منابع:**
-• ارز و طلا: TGJU.org
-• فلزات جهانی: LME/Investing.com
+**منابع داده:**
+• طلا و نقره: gold-api.com (رایگان)
+• مس: gold-api.com (رایگان)
+• ارز و طلای ایران: TGJU.org
 • بورس کالا: BrsApi.ir
 
-💡 فلزات جهانی به دلار
-💡 محصولات ایران به تومان
+**واحدها:**
+💱 دلار و طلای ایران: تومان
+🌍 فلزات جهانی: دلار آمریکا (USD)
+📊 بورس کالا: تومان/تن
 
-⏱ کش: ۵ دقیقه
-    """
-    await update.message.reply_text(help_text)
+**نکات:**
+⏱ کش: {cache_min} دقیقه
+🔄 بروزرسانی خودکار
+💡 قیمت‌ها ممکن است کمی تأخیر داشته باشند
+
+**پشتیبانی:**
+در صورت بروز مشکل، دوباره تلاش کنید.
+""".format(cache_min=config.CACHE_DURATION // 60)
+
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
 
+    # Try to notify user about the error
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "❌ خطایی رخ داد. لطفا دوباره تلاش کنید."
+            )
+        except:
+            pass
+
+
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting bot...")
-    
-    if not config.BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN not found!")
-        return
-    
+    logger.info("🚀 Starting Metal Price Bot...")
+
+    # Create application
     app = Application.builder().token(config.BOT_TOKEN).build()
-    
+
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("all", all_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(?!menu$)'))
+    app.add_handler(CallbackQueryHandler(menu_handler, pattern='^menu$'))
     app.add_error_handler(error_handler)
-    
+
     logger.info("✅ Bot started successfully!")
+    logger.info("📱 Send /start to your bot on Telegram")
     logger.info("Press Ctrl+C to stop")
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Start polling
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True  # Ignore updates received while bot was offline
+    )
+
 
 if __name__ == '__main__':
     main()
