@@ -366,83 +366,200 @@ def get_iron_ore_price():
 
 
 # ============================================
-# IME PRICES - via SOCKS5 Proxy
+# IME PRICES - Daily Proxy Fetch at 1:00 PM Tehran
 # ============================================
-def fetch_ime_prices():
-    """Fetch IME prices from ime.co.ir via SOCKS5 proxy"""
+
+# IME cache (persists until next successful fetch)
+ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None}
+
+
+def fetch_ime_via_proxy():
+    """Try to fetch IME data via SOCKS5 proxies"""
+    import time
     
-    # Try to fetch auction report page
-    try:
-        r = fetch_with_proxy('https://www.ime.co.ir/auction-total-report.html', timeout=15)
-        
-        if r and r.status_code == 200:
-            soup = BeautifulSoup(r.content, 'html.parser')
-            text = soup.get_text()
-            
-            result = "📊 **بورس کالای ایران (IME):**\n\n"
-            
-            # Extract products from text
-            products = {
-                'کنسانتره': ('🔹 کنسانتره آهن', 'iron'),
-                'گندله': ('🔹 گندله آهن', 'iron'),
-                'اسفنجی': ('🔹 آهن اسفنجی', 'iron'),
-                'شمش فولاد': ('🔸 شمش فولاد', 'steel'),
-                'شمش': ('🔸 شمش فولاد', 'steel'),
-                'میلگرد': ('🔸 میلگرد', 'steel'),
-                'ورق گرم': ('🔸 ورق گرم', 'steel'),
-                'ورق سرد': ('🔸 ورق سرد', 'steel'),
+    proxy_list = list(IME_PROXIES)
+    random.shuffle(proxy_list)
+    
+    for proxy_url in proxy_list[:6]:  # Try max 6 proxies
+        try:
+            proxies = {'http': proxy_url, 'https': proxy_url}
+            headers_proxy = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             }
             
-            found = []
-            for keyword, (display, cat) in products.items():
-                if keyword in text:
-                    # Find price near keyword
-                    idx = text.find(keyword)
-                    context = text[idx:idx+200]
-                    
-                    # Look for price pattern (rial amounts)
-                    price_match = re.search(r'(\d[\d,]{5,})', context)
-                    if price_match:
-                        price_rial = price_match.group(1).replace(',', '')
-                        try:
-                            price_toman = int(price_rial) // 10
-                            found.append((display, f"{price_toman:,} تومان/تن", cat))
-                        except:
-                            pass
+            # Step 1: Get the page
+            r = requests.get('https://www.ime.co.ir/arze.html', 
+                           proxies=proxies, headers=headers_proxy, timeout=12, verify=False)
             
-            if found:
-                iron = [f for f in found if f[2] == 'iron']
-                steel = [f for f in found if f[2] == 'steel']
+            if r.status_code != 200 or len(r.content) < 5000:
+                continue
+            
+            soup = BeautifulSoup(r.content, 'html.parser')
+            
+            # Extract form fields
+            viewstate = soup.find('input', {'id': '__VIEWSTATE'})
+            viewstate_gen = soup.find('input', {'id': '__VIEWSTATEGENERATOR'})
+            event_validation = soup.find('input', {'id': '__EVENTVALIDATION'})
+            
+            if not viewstate:
+                continue
+            
+            # Step 2: Submit form to load data
+            time.sleep(1)  # Small delay between requests
+            
+            today = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d')
+            
+            form_data = {
+                '__VIEWSTATE': viewstate.get('value', ''),
+                '__VIEWSTATEGENERATOR': viewstate_gen.get('value', '') if viewstate_gen else '',
+                '__EVENTVALIDATION': event_validation.get('value', '') if event_validation else '',
+                'ctl05$ReportsHeaderControl$FromDate': today,
+                'ctl05$ReportsHeaderControl$ToDate': today,
+                'ctl05$ReportsHeaderControl$FillGrid': 'نمایش',
+                'mainCat': '',
+                'Cats': '',
+                'SubCat': '',
+                'Producers': '',
+                'PageSizeDD': '200',
+            }
+            
+            r2 = requests.post('https://www.ime.co.ir/arze.html',
+                             data=form_data, proxies=proxies, headers=headers_proxy,
+                             timeout=15, verify=False)
+            
+            if r2.status_code == 200 and len(r2.content) > 10000:
+                return r2.text
                 
-                if iron:
-                    result += "**محصولات آهنی:**\n"
-                    for name, price, _ in iron:
-                        result += f"{name}: {price}\n"
-                    result += "\n"
-                
-                if steel:
-                    result += "**محصولات فولادی:**\n"
-                    for name, price, _ in steel:
-                        result += f"{name}: {price}\n"
-                
-                result += f"\n⏰ {get_tehran_time()}"
-                return result
-            else:
-                result += "📭 در حال بروزرسانی...\n"
-                result += "(پروکسی فعال است ولی داده‌ها در دسترس نیستند)"
-                return result
-    except Exception as e:
-        logger.error(f"IME proxy error: {e}")
+        except:
+            continue
     
-    # Fallback message
-    return """📊 **بورس کالای ایران (IME):**
+    return None
 
-⚠️ سرورهای ایران در دسترس نیستند
-(پروکسی‌های رایگان موقتاً کار نمی‌کنند)
 
-🔄 لطفاً چند دقیقه دیگر دوباره تلاش کنید
+def parse_ime_data(html_text):
+    """Parse IME HTML and extract prices for tracked symbols"""
+    if not html_text:
+        return {}
+    
+    soup = BeautifulSoup(html_text, 'html.parser')
+    prices = {}
+    
+    # Find all rows in the page
+    all_text = soup.get_text()
+    
+    for symbol, product in config.IME_PRODUCTS.items():
+        # Search for the symbol in the page
+        if symbol in all_text:
+            # Find the context around the symbol
+            idx = all_text.find(symbol)
+            context = all_text[max(0, idx-200):idx+200]
+            
+            # Look for price pattern (rial amounts)
+            # Pattern: number with commas (e.g., 86,174 or 861740)
+            price_matches = re.findall(r'(\d{2,3},\d{3}(?:,\d{3})*)', context)
+            
+            if price_matches:
+                for price_str in price_matches:
+                    price_rial = int(price_str.replace(',', ''))
+                    # Valid price range for IME products (in rial)
+                    if 10000 < price_rial < 10000000:
+                        price_toman = price_rial // 10
+                        prices[symbol] = {
+                            'price_toman': price_toman,
+                            'price_rial': price_rial,
+                            'name_fa': product['name_fa'],
+                            'name_en': product['name_en'],
+                            'supplier': product['supplier'],
+                            'category': product['category'],
+                        }
+                        break
+    
+    return prices
 
-🔗 https://www.ime.co.ir"""
+
+def update_ime_cache():
+    """Update IME cache by fetching data via proxy"""
+    logger.info("Attempting IME data fetch via proxy...")
+    
+    html = fetch_ime_via_proxy()
+    if html:
+        prices = parse_ime_data(html)
+        if prices:
+            ime_cache['prices'] = prices
+            ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
+            logger.info(f"IME cache updated: {len(prices)} products found")
+            return True
+    
+    logger.warning("IME fetch failed, using cached data")
+    return False
+
+
+def should_update_ime():
+    """Check if we should attempt IME update (1:00 PM Tehran time)"""
+    now = datetime.now(TEHRAN_TZ)
+    
+    # Check if we already tried today
+    if ime_cache['last_attempt']:
+        last_attempt = ime_cache['last_attempt']
+        if last_attempt.date() == now.date():
+            return False
+    
+    # Update at 1:00 PM Tehran time (13:00)
+    if now.hour >= 13:
+        return True
+    
+    return False
+
+
+def fetch_ime_prices():
+    """Fetch IME prices - try proxy if it's update time, otherwise use cache"""
+    now = datetime.now(TEHRAN_TZ)
+    
+    # Check if we should try to update
+    if should_update_ime():
+        ime_cache['last_attempt'] = now
+        update_ime_cache()
+    
+    # Build result from cache
+    if ime_cache['prices']:
+        result = "📊 **بورس کالای ایران (IME):**\n\n"
+        
+        iron_products = []
+        steel_products = []
+        
+        for symbol, data in ime_cache['prices'].items():
+            price_str = f"{data['price_toman']:,} تومان/تن"
+            line = f"🔹 **{data['name_fa']}:** {price_str}"
+            
+            if data['category'] == 'iron':
+                iron_products.append(line)
+            else:
+                steel_products.append(line)
+        
+        if iron_products:
+            result += "**محصولات آهنی:**\n"
+            result += "\n".join(iron_products) + "\n\n"
+        
+        if steel_products:
+            result += "**محصولات فولادی:**\n"
+            result += "\n".join(steel_products) + "\n"
+        
+        if ime_cache['last_update']:
+            update_time = ime_cache['last_update'].strftime('%Y/%m/%d %H:%M')
+            result += f"\n🕐 آخرین بروزرسانی: {update_time} (تهران)"
+        
+        return result
+    
+    # No cached data
+    next_update = "13:00"
+    return f"""📊 **بورس کالای ایران (IME):**
+
+⏳ داده‌ای موجود نیست
+🔄 بروزرسانی بعدی: امروز ساعت {next_update} (تهران)
+
+💡 ربات هر روز ساعت ۱۳:۰۰ از طریق پروکسی تلاش می‌کند
+   اگر پروکسی کار کند، قیمت‌ها ذخیره می‌شوند"""
 
 
 def get_ime_prices():
