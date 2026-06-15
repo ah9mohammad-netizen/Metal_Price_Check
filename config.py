@@ -1,37 +1,39 @@
 """
 Configuration management - Railway compatible
+⚠️  SECURITY: Never hardcode API keys! Use environment variables only.
 """
 import os
+import sys
 
-# Bot Configuration - Railway provides these as environment variables
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '7702491065:AAEVHCOBeJR7jBUSrvajHnTWvWcJgvk7gis')
+# ============================================
+# Bot Configuration
+# Railway provides these as environment variables
+# Set them in Railway dashboard → Variables tab
+# ============================================
 
-# API Keys
-IME_API_KEY = os.environ.get('IME_API_KEY', 'BfPww5C8aF9gyjqsTuTzLL4kXLyuTGFz')
-ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'BGZVC2NKH7YM5X2N')
-
-# API Endpoints
-BRSAPI_BASE_URL = "https://brsapi.ir/api/v1"
-ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
-
-# Cache settings (5 minutes)
-CACHE_DURATION = int(os.environ.get('CACHE_DURATION', '300'))
-
-# Logging
-print("=" * 50)
-print("🔧 CONFIGURATION")
-print("=" * 50)
-print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
-print(f"BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}")
-print(f"IME_API_KEY: {IME_API_KEY[:10]}..." if IME_API_KEY else "Missing")
-print(f"ALPHA_VANTAGE: {ALPHA_VANTAGE_API_KEY[:10]}..." if ALPHA_VANTAGE_API_KEY else "Missing")
-print(f"Cache duration: {CACHE_DURATION}s")
-print("=" * 50)
-
-# Validate
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
     print("❌ ERROR: BOT_TOKEN environment variable is missing!")
-    print("Please set it in Railway dashboard under Variables tab")
-    raise ValueError("BOT_TOKEN is required!")
+    print("Set it in Railway dashboard → Variables tab")
+    sys.exit(1)
 
-print("✅ Configuration loaded successfully")
+# BrsApi for Iran Mercantile Exchange (IME) prices
+IME_API_KEY = os.environ.get('IME_API_KEY', '')
+
+# Cache settings (5 minutes = 300 seconds)
+CACHE_DURATION = int(os.environ.get('CACHE_DURATION', '300'))
+
+# API Endpoints (free, no auth required)
+GOLD_API_BASE = "https://api.gold-api.com"
+TGJU_BASE = "https://www.tgju.org"
+
+# Logging configuration
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+
+print("=" * 50)
+print("🔧 CONFIGURATION LOADED")
+print("=" * 50)
+print(f"BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}")
+print(f"IME_API_KEY: {'✅ Set' if IME_API_KEY else '⚠️  Not set (IME prices disabled)'}")
+print(f"Cache duration: {CACHE_DURATION}s")
+print("=" * 50)
