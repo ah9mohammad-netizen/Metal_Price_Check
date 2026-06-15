@@ -1,7 +1,8 @@
 """
-Price fetching - ALL from livedata.ir
-======================================
+Price fetching - ALL from livedata.ir + IME via SOCKS5 proxy
+=============================================================
 Primary Source: livedata.ir (Iranian site with all metals + USD/Toman)
+IME Source: ime.co.ir via SOCKS5 proxies (unreliable but free)
 Fallback: gold-api.com, TradingEconomics
 """
 
@@ -11,12 +12,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 import config
 import re
+import random
 
 logger = logging.getLogger(__name__)
 
 # Cache
 price_cache = {}
 CACHE_TIME = timedelta(seconds=config.CACHE_DURATION)
+IME_CACHE_TIME = timedelta(seconds=1800)  # 30 min cache for IME (longer due to proxy issues)
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -25,14 +28,51 @@ HEADERS = {
 # Tehran timezone (UTC+3:30)
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
+# SOCKS5 proxies for IME (from hide.mn - updated periodically)
+IME_PROXIES = [
+    'socks5://206.123.156.232:7617',
+    'socks5://206.123.156.223:4407',
+    'socks5://206.123.156.229:4961',
+    'socks5://206.123.156.224:5028',
+    'socks5://206.123.156.230:8168',
+    'socks5://206.123.156.220:4384',
+    'socks5://206.123.156.223:6114',
+    'socks5://206.123.156.213:6111',
+    'socks5://206.123.156.206:4139',
+    'socks5://206.123.156.224:6182',
+    'socks5://206.123.156.227:4463',
+    'socks5://46.249.124.244:1390',  # HTTP proxy as fallback
+]
+
 
 def get_tehran_time():
     """Get current Tehran date and time"""
     now = datetime.now(TEHRAN_TZ)
-    # Persian month names
-    months = ['ژانویه', 'فوریه', 'مارس', 'آوریل', 'مه', 'ژوئن',
-              'جولای', 'اوت', 'سپتامبر', 'اکتبر', 'نوامبر', 'دسامبر']
-    return now.strftime('%Y/%m/%d - %H:%M') + f" (تهران)"
+    return now.strftime('%Y/%m/%d - %H:%M') + " (تهران)"
+
+
+def fetch_with_proxy(url, timeout=12):
+    """Try to fetch URL through SOCKS5 proxies"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*"
+    }
+    
+    # Shuffle proxies to distribute load
+    proxies = list(IME_PROXIES)
+    random.shuffle(proxies)
+    
+    for proxy_url in proxies[:4]:  # Try max 4 proxies
+        try:
+            proxy_dict = {'http': proxy_url, 'https': proxy_url}
+            r = requests.get(url, proxies=proxy_dict, headers=headers, 
+                           timeout=timeout, verify=False)
+            if r.status_code == 200:
+                return r
+        except:
+            continue
+    
+    return None
 
 
 def get_cached_or_fetch(key, fetch_function):
@@ -326,15 +366,82 @@ def get_iron_ore_price():
 
 
 # ============================================
-# 9-10. IME PRICES - Placeholder
+# IME PRICES - via SOCKS5 Proxy
 # ============================================
 def fetch_ime_prices():
+    """Fetch IME prices from ime.co.ir via SOCKS5 proxy"""
+    
+    # Try to fetch auction report page
+    try:
+        r = fetch_with_proxy('https://www.ime.co.ir/auction-total-report.html', timeout=15)
+        
+        if r and r.status_code == 200:
+            soup = BeautifulSoup(r.content, 'html.parser')
+            text = soup.get_text()
+            
+            result = "📊 **بورس کالای ایران (IME):**\n\n"
+            
+            # Extract products from text
+            products = {
+                'کنسانتره': ('🔹 کنسانتره آهن', 'iron'),
+                'گندله': ('🔹 گندله آهن', 'iron'),
+                'اسفنجی': ('🔹 آهن اسفنجی', 'iron'),
+                'شمش فولاد': ('🔸 شمش فولاد', 'steel'),
+                'شمش': ('🔸 شمش فولاد', 'steel'),
+                'میلگرد': ('🔸 میلگرد', 'steel'),
+                'ورق گرم': ('🔸 ورق گرم', 'steel'),
+                'ورق سرد': ('🔸 ورق سرد', 'steel'),
+            }
+            
+            found = []
+            for keyword, (display, cat) in products.items():
+                if keyword in text:
+                    # Find price near keyword
+                    idx = text.find(keyword)
+                    context = text[idx:idx+200]
+                    
+                    # Look for price pattern (rial amounts)
+                    price_match = re.search(r'(\d[\d,]{5,})', context)
+                    if price_match:
+                        price_rial = price_match.group(1).replace(',', '')
+                        try:
+                            price_toman = int(price_rial) // 10
+                            found.append((display, f"{price_toman:,} تومان/تن", cat))
+                        except:
+                            pass
+            
+            if found:
+                iron = [f for f in found if f[2] == 'iron']
+                steel = [f for f in found if f[2] == 'steel']
+                
+                if iron:
+                    result += "**محصولات آهنی:**\n"
+                    for name, price, _ in iron:
+                        result += f"{name}: {price}\n"
+                    result += "\n"
+                
+                if steel:
+                    result += "**محصولات فولادی:**\n"
+                    for name, price, _ in steel:
+                        result += f"{name}: {price}\n"
+                
+                result += f"\n⏰ {get_tehran_time()}"
+                return result
+            else:
+                result += "📭 در حال بروزرسانی...\n"
+                result += "(پروکسی فعال است ولی داده‌ها در دسترس نیستند)"
+                return result
+    except Exception as e:
+        logger.error(f"IME proxy error: {e}")
+    
+    # Fallback message
     return """📊 **بورس کالای ایران (IME):**
 
-⚠️ قیمت‌های بورس کالا در دسترس نیست
-(نیاز به پروکسی ایرانی)
+⚠️ سرورهای ایران در دسترس نیستند
+(پروکسی‌های رایگان موقتاً کار نمی‌کنند)
 
-برای اطلاعات بیشتر:
+🔄 لطفاً چند دقیقه دیگر دوباره تلاش کنید
+
 🔗 https://www.ime.co.ir"""
 
 
