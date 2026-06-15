@@ -372,15 +372,21 @@ def get_iron_ore_price():
 # IME cache (persists until next successful fetch)
 ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None}
 
+# Price field name in IME JSON
+PRICE_FIELD = 'قیمت پایانی میانگین   موزون'
+SYMBOL_FIELD = 'نماد'
+NAME_FIELD = 'نام کالا'
+UNIT_FIELD = 'واحد'
+
 
 def fetch_ime_via_proxy():
-    """Try to fetch IME data via SOCKS5 proxies"""
+    """Try to fetch IME data via SOCKS5 proxies and export as JSON"""
     import time
     
     proxy_list = list(IME_PROXIES)
     random.shuffle(proxy_list)
     
-    for proxy_url in proxy_list[:6]:  # Try max 6 proxies
+    for proxy_url in proxy_list[:6]:
         try:
             proxies = {'http': proxy_url, 'https': proxy_url}
             headers_proxy = {
@@ -399,14 +405,14 @@ def fetch_ime_via_proxy():
             
             # Extract form fields
             viewstate = soup.find('input', {'id': '__VIEWSTATE'})
-            viewstate_gen = soup.find('input', {'id': '__VIEWSTATEGENERATOR'})
-            event_validation = soup.find('input', {'id': '__EVENTVALIDATION'})
-            
             if not viewstate:
                 continue
             
+            viewstate_gen = soup.find('input', {'id': '__VIEWSTATEGENERATOR'})
+            event_validation = soup.find('input', {'id': '__EVENTVALIDATION'})
+            
             # Step 2: Submit form to load data
-            time.sleep(1)  # Small delay between requests
+            time.sleep(1)
             
             today = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d')
             
@@ -429,7 +435,8 @@ def fetch_ime_via_proxy():
                              timeout=15, verify=False)
             
             if r2.status_code == 200 and len(r2.content) > 10000:
-                return r2.text
+                # Parse the HTML table and extract data
+                return parse_ime_html_to_json(r2.text)
                 
         except:
             continue
@@ -437,43 +444,74 @@ def fetch_ime_via_proxy():
     return None
 
 
-def parse_ime_data(html_text):
-    """Parse IME HTML and extract prices for tracked symbols"""
-    if not html_text:
+def parse_ime_html_to_json(html_text):
+    """Parse IME HTML table and extract product data"""
+    soup = BeautifulSoup(html_text, 'html.parser')
+    
+    # Find the main data table
+    tables = soup.find_all('table')
+    products = []
+    
+    for table in tables:
+        rows = table.find_all('tr')
+        if len(rows) < 5:
+            continue
+        
+        # Get headers from first row
+        header_row = rows[0]
+        headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+        
+        # Check if this is the data table (has symbol column)
+        if 'نماد' not in headers and 'نام کالا' not in headers:
+            continue
+        
+        # Parse data rows
+        for row in rows[1:]:
+            cells = row.find_all('td')
+            if len(cells) >= 6:
+                row_data = {}
+                for i, cell in enumerate(cells):
+                    if i < len(headers):
+                        row_data[headers[i]] = cell.get_text(strip=True)
+                
+                if row_data.get(SYMBOL_FIELD):
+                    products.append(row_data)
+    
+    return products if products else None
+
+
+def parse_ime_data(items):
+    """Parse IME items and extract prices for tracked symbols"""
+    if not items:
         return {}
     
-    soup = BeautifulSoup(html_text, 'html.parser')
     prices = {}
     
-    # Find all rows in the page
-    all_text = soup.get_text()
-    
-    for symbol, product in config.IME_PRODUCTS.items():
-        # Search for the symbol in the page
-        if symbol in all_text:
-            # Find the context around the symbol
-            idx = all_text.find(symbol)
-            context = all_text[max(0, idx-200):idx+200]
+    for item in items:
+        symbol = item.get(SYMBOL_FIELD, '')
+        
+        if symbol in config.IME_PRODUCTS:
+            price_str = item.get(PRICE_FIELD, '0')
             
-            # Look for price pattern (rial amounts)
-            # Pattern: number with commas (e.g., 86,174 or 861740)
-            price_matches = re.findall(r'(\d{2,3},\d{3}(?:,\d{3})*)', context)
-            
-            if price_matches:
-                for price_str in price_matches:
-                    price_rial = int(price_str.replace(',', ''))
-                    # Valid price range for IME products (in rial)
-                    if 10000 < price_rial < 10000000:
-                        price_toman = price_rial // 10
-                        prices[symbol] = {
-                            'price_toman': price_toman,
-                            'price_rial': price_rial,
-                            'name_fa': product['name_fa'],
-                            'name_en': product['name_en'],
-                            'supplier': product['supplier'],
-                            'category': product['category'],
-                        }
-                        break
+            try:
+                # Price is in Rial, convert to Toman
+                price_rial = int(float(str(price_str).replace(',', '')))
+                price_toman = price_rial // 10
+                
+                if price_toman > 0:
+                    product = config.IME_PRODUCTS[symbol]
+                    prices[symbol] = {
+                        'price_toman': price_toman,
+                        'price_rial': price_rial,
+                        'name_fa': product['name_fa'],
+                        'name_en': product['name_en'],
+                        'supplier': product['supplier'],
+                        'category': product['category'],
+                        'unit': item.get(UNIT_FIELD, 'تن'),
+                        'date': item.get('تاریخ معامله', ''),
+                    }
+            except:
+                pass
     
     return prices
 
@@ -482,9 +520,9 @@ def update_ime_cache():
     """Update IME cache by fetching data via proxy"""
     logger.info("Attempting IME data fetch via proxy...")
     
-    html = fetch_ime_via_proxy()
-    if html:
-        prices = parse_ime_data(html)
+    items = fetch_ime_via_proxy()
+    if items:
+        prices = parse_ime_data(items)
         if prices:
             ime_cache['prices'] = prices
             ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
