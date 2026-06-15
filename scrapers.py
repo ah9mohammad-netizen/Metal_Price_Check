@@ -1,14 +1,14 @@
 """
-Price fetching - VERIFIED WORKING SOURCES
-==========================================
+Price fetching - ALL from livedata.ir
+======================================
 Primary Source: livedata.ir (Iranian site with all metals + USD/Toman)
-Fallback: gold-api.com, Yahoo Finance, TradingEconomics
+Fallback: gold-api.com, TradingEconomics
 """
 
 import requests
 from bs4 import BeautifulSoup
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import config
 import re
 
@@ -21,6 +21,18 @@ CACHE_TIME = timedelta(seconds=config.CACHE_DURATION)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
+
+# Tehran timezone (UTC+3:30)
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+
+def get_tehran_time():
+    """Get current Tehran date and time"""
+    now = datetime.now(TEHRAN_TZ)
+    # Persian month names
+    months = ['ژانویه', 'فوریه', 'مارس', 'آوریل', 'مه', 'ژوئن',
+              'جولای', 'اوت', 'سپتامبر', 'اکتبر', 'نوامبر', 'دسامبر']
+    return now.strftime('%Y/%m/%d - %H:%M') + f" (تهران)"
 
 
 def get_cached_or_fetch(key, fetch_function):
@@ -97,6 +109,16 @@ def fetch_livedata():
     match = re.search(r'روی\s*\n\s*([\d,]+\.?\d*)', text)
     if match:
         data['zinc_usd'] = match.group(1).replace(',', '')
+    
+    # Lead (USD/ton)
+    match = re.search(r'سرب\s*\n\s*([\d,]+\.?\d*)', text)
+    if match:
+        data['lead_usd'] = match.group(1).replace(',', '')
+    
+    # Tin (USD/ton)
+    match = re.search(r'قلع\s*\n\s*([\d,]+\.?\d*)', text)
+    if match:
+        data['tin_usd'] = match.group(1).replace(',', '')
     
     # USD/Toman (exchange rate)
     match = re.search(r'دلار\s*-\s*صرافی\s*\n\s*([\d,]+)', text)
@@ -257,7 +279,35 @@ def get_aluminum_price():
 
 
 # ============================================
-# 8. IRON ORE - from TradingEconomics
+# 8. LEAD
+# ============================================
+def fetch_lead_price():
+    data = get_livedata()
+    if data.get('lead_usd'):
+        return f"🔩 **سرب:** ${fmt(data['lead_usd'], 'USD/ton')}"
+    return "🔩 **سرب:** در حال بروزرسانی..."
+
+
+def get_lead_price():
+    return get_cached_or_fetch('lead', fetch_lead_price)
+
+
+# ============================================
+# 9. TIN
+# ============================================
+def fetch_tin_price():
+    data = get_livedata()
+    if data.get('tin_usd'):
+        return f"🪙 **قلع:** ${fmt(data['tin_usd'], 'USD/ton')}"
+    return "🪙 **قلع:** در حال بروزرسانی..."
+
+
+def get_tin_price():
+    return get_cached_or_fetch('tin', fetch_tin_price)
+
+
+# ============================================
+# 10. IRON ORE - from TradingEconomics
 # ============================================
 def fetch_iron_ore_price():
     try:
@@ -296,7 +346,7 @@ def get_ime_prices():
 # ALL PRICES
 # ============================================
 def get_all_prices():
-    timestamp = datetime.now().strftime('%Y/%m/%d - %H:%M')
+    timestamp = get_tehran_time()
     return f"""
 📊 **گزارش کامل قیمت‌ها**
 🕐 {timestamp}
@@ -317,6 +367,8 @@ def get_all_prices():
 {get_nickel_price()}
 {get_zinc_price()}
 {get_aluminum_price()}
+{get_lead_price()}
+{get_tin_price()}
 {get_iron_ore_price()}
 
 ━━━━━━━━━━━━━━━━━━━━
