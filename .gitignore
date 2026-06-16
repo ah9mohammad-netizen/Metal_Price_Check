@@ -4,3 +4,5 @@ __pycache__/
 *.pyo
 *.log
 .DS_Store
+ime_manual_prices.json
+
