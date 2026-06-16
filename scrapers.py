@@ -385,9 +385,29 @@ def get_iron_ore_price():
 # IME cache (persists until next successful fetch)
 ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None}
 
-# Manual IME prices (admin can set these, invisible to users)
-# When proxy fetch succeeds, these are replaced with fresh data
-ime_manual_prices = {}
+# Manual IME prices - persisted to file
+IME_MANUAL_FILE = 'ime_manual_prices.json'
+
+def load_manual_prices():
+    """Load manual prices from file"""
+    try:
+        import json
+        with open(IME_MANUAL_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_manual_prices(prices):
+    """Save manual prices to file"""
+    try:
+        import json
+        with open(IME_MANUAL_FILE, 'w', encoding='utf-8') as f:
+            json.dump(prices, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save manual prices: {e}")
+
+# Load manual prices on startup
+ime_manual_prices = load_manual_prices()
 
 # Price field name in IME JSON
 PRICE_FIELD = 'قیمت پایانی میانگین   موزون'
@@ -650,6 +670,8 @@ def set_manual_ime_price(symbol, price_toman):
             'date': datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d'),
             'source': 'manual'
         }
+        # Save to file for persistence
+        save_manual_prices(ime_manual_prices)
         # Also update cache so it shows immediately
         ime_cache['prices'] = dict(ime_manual_prices)
         ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
@@ -671,6 +693,14 @@ def set_multiple_manual_ime_prices(prices_dict):
         if set_manual_ime_price(symbol, price_toman):
             success_count += 1
     return success_count
+
+
+def clear_manual_prices():
+    """Admin function: Clear all manual prices"""
+    global ime_manual_prices
+    ime_manual_prices = {}
+    save_manual_prices({})
+    logger.info("Manual IME prices cleared")
 
 
 def get_ime_prices():
