@@ -239,11 +239,24 @@ def get_gold_price():
 # 3. SILVER
 # ============================================
 def fetch_silver_price():
+    """Silver: International USD + calculated Iran Toman/gram"""
     data = get_livedata()
     result = ""
     
-    if data.get('silver_usd'):
-        result += f"⚪ **نقره (جهانی):** ${fmt(data['silver_usd'], 'USD/اونس')}"
+    silver_usd = data.get('silver_usd', '0')
+    usd_toman = data.get('usd_toman', '0')
+    
+    if silver_usd:
+        result += f"⚪ **نقره (جهانی):** ${fmt(silver_usd, 'USD/اونس')}\n"
+        
+        # Calculate Iran price: (USD/oz × Toman/USD) ÷ 31.1035 grams/oz
+        try:
+            silver_usd_float = float(silver_usd)
+            usd_toman_float = float(usd_toman)
+            toman_per_gram = (silver_usd_float * usd_toman_float) / 31.1035
+            result += f"⚪ **نقره (ایران):** {fmt(toman_per_gram, 'تومان/گرم', 0)}"
+        except:
+            pass
     
     if not result:
         try:
@@ -371,6 +384,10 @@ def get_iron_ore_price():
 
 # IME cache (persists until next successful fetch)
 ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None}
+
+# Manual IME prices (admin can set these, invisible to users)
+# When proxy fetch succeeds, these are replaced with fresh data
+ime_manual_prices = {}
 
 # Price field name in IME JSON
 PRICE_FIELD = 'قیمت پایانی میانگین   موزون'
@@ -557,20 +574,30 @@ def fetch_ime_prices():
     # Check if we should try to update
     if should_update_ime():
         ime_cache['last_attempt'] = now
-        update_ime_cache()
+        success = update_ime_cache()
+        if success:
+            # Clear manual prices when fresh data arrives
+            ime_manual_prices.clear()
     
-    # Build result from cache
-    if ime_cache['prices']:
+    # Use fresh cache if available
+    prices = ime_cache.get('prices', {})
+    
+    # Fallback to manual prices if no fresh data
+    if not prices and ime_manual_prices:
+        prices = ime_manual_prices
+    
+    # Build result
+    if prices:
         result = "📊 **بورس کالای ایران (IME):**\n\n"
         
         iron_products = []
         steel_products = []
         
-        for symbol, data in ime_cache['prices'].items():
+        for symbol, data in prices.items():
             price_str = f"{data['price_toman']:,} تومان/تن"
             line = f"🔹 **{data['name_fa']}:** {price_str}"
             
-            if data['category'] == 'iron':
+            if data.get('category') == 'iron':
                 iron_products.append(line)
             else:
                 steel_products.append(line)
@@ -583,7 +610,7 @@ def fetch_ime_prices():
             result += "**محصولات فولادی:**\n"
             result += "\n".join(steel_products) + "\n"
         
-        if ime_cache['last_update']:
+        if ime_cache.get('last_update'):
             update_time = ime_cache['last_update'].strftime('%Y/%m/%d %H:%M')
             result += f"\n🕐 آخرین بروزرسانی: {update_time} (تهران)"
         
@@ -598,6 +625,52 @@ def fetch_ime_prices():
 
 💡 ربات هر روز ساعت ۱۳:۰۰ از طریق پروکسی تلاش می‌کند
    اگر پروکسی کار کند، قیمت‌ها ذخیره می‌شوند"""
+
+
+def set_manual_ime_price(symbol, price_toman):
+    """Admin function: Manually set IME price (invisible to users)
+    
+    Args:
+        symbol: Product symbol (e.g., 'GHZ-OAIOC-00')
+        price_toman: Price in Toman per ton
+    
+    Returns:
+        bool: True if successful
+    """
+    if symbol in config.IME_PRODUCTS:
+        product = config.IME_PRODUCTS[symbol]
+        ime_manual_prices[symbol] = {
+            'price_toman': price_toman,
+            'price_rial': price_toman * 10,
+            'name_fa': product['name_fa'],
+            'name_en': product['name_en'],
+            'supplier': product['supplier'],
+            'category': product['category'],
+            'unit': 'تن',
+            'date': datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d'),
+            'source': 'manual'
+        }
+        # Also update cache so it shows immediately
+        ime_cache['prices'] = dict(ime_manual_prices)
+        ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
+        return True
+    return False
+
+
+def set_multiple_manual_ime_prices(prices_dict):
+    """Admin function: Set multiple IME prices at once
+    
+    Args:
+        prices_dict: {symbol: price_toman, ...}
+    
+    Returns:
+        int: Number of prices set successfully
+    """
+    success_count = 0
+    for symbol, price_toman in prices_dict.items():
+        if set_manual_ime_price(symbol, price_toman):
+            success_count += 1
+    return success_count
 
 
 def get_ime_prices():
