@@ -5,4 +5,4 @@ __pycache__/
 *.log
 .DS_Store
 ime_manual_prices.json
-
+ime_proxies.json
