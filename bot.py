@@ -235,6 +235,49 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot status (admin only)"""
+    user = update.effective_user
+    
+    # Build status message
+    status = "📊 **وضعیت ربات:**\n\n"
+    
+    # Data sources
+    status += "✅ **منابع داده:**\n"
+    status += "  • livedata.ir (فلزات + دلار)\n"
+    status += "  • gold-api.com (پشتیبانی)\n"
+    status += "  • TradingEconomics (سنگ آهن)\n\n"
+    
+    # IME status
+    status += "📊 **بورس کالا (IME):**\n"
+    if scrapers.ime_cache.get('prices'):
+        status += f"  • {len(scrapers.ime_cache['prices'])} محصول ذخیره شده\n"
+    if scrapers.ime_manual_prices:
+        status += f"  • {len(scrapers.ime_manual_prices)} قیمت دستی\n"
+    if scrapers.ime_cache.get('last_update'):
+        status += f"  • آخرین بروزرسانی: {scrapers.ime_cache['last_update'].strftime('%H:%M')}\n"
+    
+    # Proxy status
+    status += f"\n🌐 **پروکسی:**\n"
+    status += f"  • {len(scrapers.IME_PROXIES)} پروکسی فعال\n"
+    if scrapers.ime_cache.get('proxy_update_date'):
+        status += f"  • بروزرسانی: {scrapers.ime_cache['proxy_update_date'].strftime('%Y/%m/%d')}\n"
+    
+    await update.message.reply_text(status, parse_mode=ParseMode.MARKDOWN)
+
+
+async def update_proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually update proxy list"""
+    loading = await update.message.reply_text("🔄 در حال بروزرسانی لیست پروکسی...")
+    
+    new_proxies = scrapers.update_proxy_list()
+    if new_proxies:
+        scrapers.IME_PROXIES = new_proxies
+        await loading.edit_text(f"✅ {len(new_proxies)} پروکسی جدید ذخیره شد")
+    else:
+        await loading.edit_text("❌ خطا در دریافت پروکسی‌ها")
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
@@ -260,6 +303,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("all", all_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("updateproxies", update_proxies_command))
     app.add_handler(CallbackQueryHandler(button_handler, pattern='^(?!menu$)'))
     app.add_handler(CallbackQueryHandler(menu_handler, pattern='^menu$'))
     app.add_error_handler(error_handler)
