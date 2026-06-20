@@ -28,21 +28,89 @@ HEADERS = {
 # Tehran timezone (UTC+3:30)
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
-# SOCKS5 proxies for IME (from hide.mn - updated periodically)
-IME_PROXIES = [
-    'socks5://206.123.156.232:7617',
-    'socks5://206.123.156.223:4407',
-    'socks5://206.123.156.229:4961',
-    'socks5://206.123.156.224:5028',
-    'socks5://206.123.156.230:8168',
-    'socks5://206.123.156.220:4384',
-    'socks5://206.123.156.223:6114',
-    'socks5://206.123.156.213:6111',
-    'socks5://206.123.156.206:4139',
-    'socks5://206.123.156.224:6182',
-    'socks5://206.123.156.227:4463',
-    'socks5://46.249.124.244:1390',  # HTTP proxy as fallback
-]
+# SOCKS5 proxies for IME (auto-updated from hide.mn)
+IME_PROXIES_FILE = 'ime_proxies.json'
+IME_PROXIES = []
+
+def load_proxies():
+    """Load proxies from file"""
+    try:
+        import json
+        with open(IME_PROXIES_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_proxies(proxies):
+    """Save proxies to file"""
+    try:
+        import json
+        with open(IME_PROXIES_FILE, 'w') as f:
+            json.dump(proxies, f)
+    except Exception as e:
+        logger.error(f"Failed to save proxies: {e}")
+
+def fetch_proxies_from_hidemn():
+    """Fetch fresh SOCKS5 proxies from hide.mn"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        r = requests.get('https://hide.mn/en/proxy-list/countries/iran/', 
+                        headers=headers, timeout=15)
+        
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.content, 'html.parser')
+            
+            # Find proxy table (first table on the page)
+            proxies = []
+            tables = soup.find_all('table')
+            
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows[1:]:  # Skip header
+                    cells = row.find_all('td')
+                    if len(cells) >= 5:
+                        ip = cells[0].get_text(strip=True)
+                        port = cells[1].get_text(strip=True)
+                        proxy_type = cells[4].get_text(strip=True)
+                        
+                        # Only get SOCKS5 and HTTP proxies
+                        if 'SOCKS5' in proxy_type.upper():
+                            proxies.append(f'socks5://{ip}:{port}')
+                        elif 'HTTP' in proxy_type.upper():
+                            proxies.append(f'http://{ip}:{port}')
+                
+                if proxies:  # Found proxies in first table
+                    break
+            
+            if proxies:
+                logger.info(f"Fetched {len(proxies)} proxies from hide.mn")
+                return proxies
+    except Exception as e:
+        logger.error(f"Failed to fetch proxies: {e}")
+    
+    return None
+
+def update_proxy_list():
+    """Update proxy list from hide.mn (called daily)"""
+    proxies = fetch_proxies_from_hidemn()
+    if proxies:
+        save_proxies(proxies)
+        return proxies
+    return None
+
+# Load proxies on startup
+IME_PROXIES = load_proxies()
+if not IME_PROXIES:
+    # Default proxies if none saved
+    IME_PROXIES = [
+        'socks5://206.123.156.232:7617',
+        'socks5://206.123.156.223:4407',
+        'socks5://206.123.156.229:4961',
+        'socks5://206.123.156.227:4463',
+        'socks5://206.123.156.224:5028',
+    ]
 
 
 def get_tehran_time():
@@ -383,7 +451,7 @@ def get_iron_ore_price():
 # ============================================
 
 # IME cache (persists until next successful fetch)
-ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None}
+ime_cache = {'prices': {}, 'last_update': None, 'last_attempt': None, 'last_success_date': None, 'proxy_update_date': None}
 
 # Manual IME prices - persisted to file
 IME_MANUAL_FILE = 'ime_manual_prices.json'
@@ -420,8 +488,24 @@ def fetch_ime_via_proxy():
     """Try to fetch IME data via SOCKS5 proxies and export as JSON"""
     import time
     
+    global IME_PROXIES
+    
+    # Check if we need to update proxy list (once per day)
+    now = datetime.now(TEHRAN_TZ)
+    if (not ime_cache.get('proxy_update_date') or 
+        (now - ime_cache['proxy_update_date']).total_seconds() > 86400):  # 24 hours
+        logger.info("Updating proxy list from hide.mn...")
+        new_proxies = update_proxy_list()
+        if new_proxies:
+            IME_PROXIES = new_proxies
+        ime_cache['proxy_update_date'] = now
+    
     proxy_list = list(IME_PROXIES)
     random.shuffle(proxy_list)
+    
+    # Use today's date in Persian format (Shamsi)
+    # For now, we'll let the form use its default date
+    # The server will show latest data
     
     for proxy_url in proxy_list[:6]:
         try:
@@ -448,17 +532,22 @@ def fetch_ime_via_proxy():
             viewstate_gen = soup.find('input', {'id': '__VIEWSTATEGENERATOR'})
             event_validation = soup.find('input', {'id': '__EVENTVALIDATION'})
             
+            # Get the default dates from the form (server sets latest dates)
+            from_date_input = soup.find('input', {'id': 'ctl05_ReportsHeaderControl_FromDate'})
+            to_date_input = soup.find('input', {'id': 'ctl05_ReportsHeaderControl_ToDate'})
+            
+            from_date = from_date_input.get('value', '') if from_date_input else ''
+            to_date = to_date_input.get('value', '') if to_date_input else ''
+            
             # Step 2: Submit form to load data
             time.sleep(1)
-            
-            today = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d')
             
             form_data = {
                 '__VIEWSTATE': viewstate.get('value', ''),
                 '__VIEWSTATEGENERATOR': viewstate_gen.get('value', '') if viewstate_gen else '',
                 '__EVENTVALIDATION': event_validation.get('value', '') if event_validation else '',
-                'ctl05$ReportsHeaderControl$FromDate': today,
-                'ctl05$ReportsHeaderControl$ToDate': today,
+                'ctl05$ReportsHeaderControl$FromDate': from_date,
+                'ctl05$ReportsHeaderControl$ToDate': to_date,
                 'ctl05$ReportsHeaderControl$FillGrid': 'نمایش',
                 'mainCat': '',
                 'Cats': '',
@@ -571,20 +660,28 @@ def update_ime_cache():
 
 
 def should_update_ime():
-    """Check if we should attempt IME update (1:00 PM Tehran time)"""
+    """Check if we should attempt IME update (hourly)"""
     now = datetime.now(TEHRAN_TZ)
     
-    # Check if we already tried today
-    if ime_cache['last_attempt']:
-        last_attempt = ime_cache['last_attempt']
-        if last_attempt.date() == now.date():
-            return False
-    
-    # Update at 1:00 PM Tehran time (13:00)
-    if now.hour >= 13:
+    # If we have no last attempt, try now
+    if not ime_cache['last_attempt']:
         return True
     
-    return False
+    # Try every hour (3600 seconds)
+    time_since_last = (now - ime_cache['last_attempt']).total_seconds()
+    if time_since_last < 3600:  # Less than 1 hour
+        return False
+    
+    # Only try during market hours (8 AM to 5 PM Tehran time)
+    # This saves proxy resources when market is closed
+    if 8 <= now.hour <= 17:
+        return True
+    
+    # Outside market hours, try only once every 4 hours
+    if time_since_last < 14400:  # Less than 4 hours
+        return False
+    
+    return True
 
 
 def fetch_ime_prices():
@@ -598,6 +695,7 @@ def fetch_ime_prices():
         if success:
             # Clear manual prices when fresh data arrives
             ime_manual_prices.clear()
+            save_manual_prices({})
     
     # Use fresh cache if available
     prices = ime_cache.get('prices', {})
@@ -630,21 +728,30 @@ def fetch_ime_prices():
             result += "**محصولات فولادی:**\n"
             result += "\n".join(steel_products) + "\n"
         
+        # Show data date (from IME transaction date)
+        data_date = None
+        for d in prices.values():
+            if d.get('date'):
+                data_date = d['date']
+                break
+        
+        if data_date:
+            result += f"\n📅 تاریخ معامله: {data_date}"
+        
         if ime_cache.get('last_update'):
-            update_time = ime_cache['last_update'].strftime('%Y/%m/%d %H:%M')
-            result += f"\n🕐 آخرین بروزرسانی: {update_time} (تهران)"
+            update_time = ime_cache['last_update'].strftime('%H:%M')
+            result += f"\n🕐 بروزرسانی: {update_time} (تهران)"
         
         return result
     
     # No cached data
-    next_update = "13:00"
-    return f"""📊 **بورس کالای ایران (IME):**
+    return """📊 **بورس کالای ایران (IME):**
 
 ⏳ داده‌ای موجود نیست
-🔄 بروزرسانی بعدی: امروز ساعت {next_update} (تهران)
+🔄 در حال تلاش برای دریافت...
 
-💡 ربات هر روز ساعت ۱۳:۰۰ از طریق پروکسی تلاش می‌کند
-   اگر پروکسی کار کند، قیمت‌ها ذخیره می‌شوند"""
+💡 ربات هر ساعت تلاش می‌کند
+   قیمت‌ها پس از اولین موفقیت ذخیره می‌شوند"""
 
 
 def set_manual_ime_price(symbol, price_toman):
