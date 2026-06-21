@@ -2,7 +2,7 @@
 Price fetching - ALL from livedata.ir + IME via SOCKS5 proxy
 =============================================================
 Primary Source: livedata.ir (Iranian site with all metals + USD/Toman)
-IME Source: ime.co.ir via SOCKS5 proxies (unreliable but free)
+IME Source: ime.co.ir via SOCKS5 proxies
 Fallback: gold-api.com, TradingEconomics
 """
 
@@ -13,13 +13,14 @@ from datetime import datetime, timedelta, timezone
 import config
 import re
 import random
+import json
 
 logger = logging.getLogger(__name__)
 
 # Cache
 price_cache = {}
 CACHE_TIME = timedelta(seconds=config.CACHE_DURATION)
-IME_CACHE_TIME = timedelta(seconds=1800)  # 30 min cache for IME (longer due to proxy issues)
+IME_CACHE_TIME = timedelta(seconds=1800)  # 30 min cache for IME
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -27,6 +28,88 @@ HEADERS = {
 
 # Tehran timezone (UTC+3:30)
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+
+def gregorian_to_jalali(gy, gm, gd):
+    """Convert Gregorian date to Jalali (Persian/Shamsi)"""
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gm > 2:
+        gy2 = gy + 1
+    else:
+        gy2 = gy
+    days = 355666 + (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100) + \
+           ((gy2 + 399) // 400) + gd + g_d_m[gm - 1]
+    jy = -1595 + (33 * (days // 12053))
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + (days // 31)
+        jd = 1 + (days % 31)
+    else:
+        jm = 7 + ((days - 186) // 30)
+        jd = 1 + ((days - 186) % 30)
+    return jy, jm, jd
+
+
+def get_jalali_date_str(date_obj=None):
+    """Get Jalali date string from datetime object"""
+    if date_obj is None:
+        date_obj = datetime.now(TEHRAN_TZ)
+    jy, jm, jd = gregorian_to_jalali(date_obj.year, date_obj.month, date_obj.day)
+    return f"{jy}/{jm:02d}/{jd:02d}"
+
+
+def get_jalali_month_name(month_num):
+    """Get Persian month name"""
+    months = {
+        1: 'فروردین', 2: 'اردیبهشت', 3: 'خرداد',
+        4: 'تیر', 5: 'مرداد', 6: 'شهریور',
+        7: 'مهر', 8: 'آبان', 9: 'آذر',
+        10: 'دی', 11: 'بهمن', 12: 'اسفند'
+    }
+    return months.get(month_num, str(month_num))
+
+
+def get_tehran_time():
+    """Get current Tehran date and time in numeric Jalali format"""
+    now = datetime.now(TEHRAN_TZ)
+    jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
+    time_str = now.strftime('%H:%M')
+    return f"{jd:02d}/{jm:02d}/{jy} - {time_str}"
+
+
+def get_jalali_date_from_str(date_str):
+    """Convert date string (YYYY/MM/DD or 1405/03/31) to numeric Jalali format
+    
+    Handles both Gregorian and Jalali input formats
+    Returns format: DD/MM/YYYY (e.g., 26/03/1405)
+    """
+    if not date_str:
+        return date_str
+    
+    try:
+        parts = date_str.split('/')
+        if len(parts) == 3:
+            year = int(parts[0])
+            month = int(parts[1])
+            day = int(parts[2])
+            
+            # Check if it's already Jalali (year between 1300-1500)
+            if 1300 <= year <= 1500:
+                # Already Jalali
+                return f"{day:02d}/{month:02d}/{year}"
+            else:
+                # Gregorian - convert to Jalali
+                jy, jm, jd = gregorian_to_jalali(year, month, day)
+                return f"{jd:02d}/{jm:02d}/{jy}"
+    except:
+        pass
+    
+    return date_str
 
 # SOCKS5 proxies for IME (auto-updated from hide.mn)
 IME_PROXIES_FILE = 'ime_proxies.json'
@@ -111,12 +194,6 @@ if not IME_PROXIES:
         'socks5://206.123.156.227:4463',
         'socks5://206.123.156.224:5028',
     ]
-
-
-def get_tehran_time():
-    """Get current Tehran date and time"""
-    now = datetime.now(TEHRAN_TZ)
-    return now.strftime('%Y/%m/%d - %H:%M') + " (تهران)"
 
 
 def fetch_with_proxy(url, timeout=12):
@@ -643,20 +720,47 @@ def parse_ime_data(items):
 
 
 def update_ime_cache():
-    """Update IME cache by fetching data via proxy"""
+    """Update IME cache by fetching data via proxy
+    
+    Logic:
+    - Fetch all supplies for today from ime.co.ir
+    - Check if any of our 5 tracked symbols are in the export
+    - For symbols found: update price in cache AND manual JSON
+    - For symbols NOT found: keep using manual JSON price
+    """
     logger.info("Attempting IME data fetch via proxy...")
     
     items = fetch_ime_via_proxy()
-    if items:
-        prices = parse_ime_data(items)
-        if prices:
-            ime_cache['prices'] = prices
-            ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
-            logger.info(f"IME cache updated: {len(prices)} products found")
-            return True
+    if not items:
+        logger.warning("IME fetch failed, using cached data")
+        return False
     
-    logger.warning("IME fetch failed, using cached data")
-    return False
+    # Parse found items
+    found_prices = parse_ime_data(items)
+    
+    if found_prices:
+        logger.info(f"Found {len(found_prices)} of our symbols in today's export")
+        
+        # Update cache with found prices
+        ime_cache['prices'].update(found_prices)
+        ime_cache['last_update'] = datetime.now(TEHRAN_TZ)
+        
+        # Update manual JSON with found prices (keep others)
+        for symbol, data in found_prices.items():
+            ime_manual_prices[symbol] = data
+        save_manual_prices(ime_manual_prices)
+        
+        # Add any manual prices that weren't in today's export
+        for symbol, data in ime_manual_prices.items():
+            if symbol not in ime_cache['prices']:
+                ime_cache['prices'][symbol] = data
+        
+        logger.info(f"IME cache updated: {len(found_prices)} new, {len(ime_manual_prices)} total")
+        return True
+    else:
+        logger.info("No tracked symbols in today's export, keeping cached prices")
+        # Keep existing cache
+        return False
 
 
 def should_update_ime():
@@ -691,11 +795,7 @@ def fetch_ime_prices():
     # Check if we should try to update
     if should_update_ime():
         ime_cache['last_attempt'] = now
-        success = update_ime_cache()
-        if success:
-            # Clear manual prices when fresh data arrives
-            ime_manual_prices.clear()
-            save_manual_prices({})
+        update_ime_cache()
     
     # Use fresh cache if available
     prices = ime_cache.get('prices', {})
@@ -713,7 +813,8 @@ def fetch_ime_prices():
         
         for symbol, data in prices.items():
             price_str = f"{data['price_toman']:,} تومان/تن"
-            line = f"🔹 **{data['name_fa']}:** {price_str}"
+            supplier = data.get('supplier', '')
+            line = f"🔹 **{data['name_fa']}** ({supplier})\n   {price_str}"
             
             if data.get('category') == 'iron':
                 iron_products.append(line)
@@ -721,14 +822,14 @@ def fetch_ime_prices():
                 steel_products.append(line)
         
         if iron_products:
-            result += "**محصولات آهنی:**\n"
+            result += "**🔸 محصولات آهنی:**\n"
             result += "\n".join(iron_products) + "\n\n"
         
         if steel_products:
-            result += "**محصولات فولادی:**\n"
+            result += "**🔹 محصولات فولادی:**\n"
             result += "\n".join(steel_products) + "\n"
         
-        # Show data date (from IME transaction date)
+        # Show data date in Jalali format
         data_date = None
         for d in prices.values():
             if d.get('date'):
@@ -736,11 +837,13 @@ def fetch_ime_prices():
                 break
         
         if data_date:
-            result += f"\n📅 تاریخ معامله: {data_date}"
+            # Convert to Jalali display format
+            data_date = get_jalali_date_from_str(data_date)
+            result += f"\n📅 تاریخ: {data_date}"
         
         if ime_cache.get('last_update'):
             update_time = ime_cache['last_update'].strftime('%H:%M')
-            result += f"\n🕐 بروزرسانی: {update_time} (تهران)"
+            result += f" | ⏰ {update_time}"
         
         return result
     
