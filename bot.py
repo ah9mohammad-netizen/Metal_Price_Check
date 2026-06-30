@@ -292,12 +292,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def post_init(application: Application):
+    """Delete webhook before starting polling"""
+    logger.info("Deleting any existing webhook...")
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted successfully")
+
+
 def main():
     """Start the bot"""
     logger.info("🚀 Starting Metal Price Bot...")
 
-    # Create application
-    app = Application.builder().token(config.BOT_TOKEN).build()
+    # Create application with post_init callback to delete webhook
+    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
     # Add handlers
     app.add_handler(CommandHandler("start", start))
@@ -316,7 +323,7 @@ def main():
     # Start polling
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True  # Ignore updates received while bot was offline
+        drop_pending_updates=True,
     )
 
 
